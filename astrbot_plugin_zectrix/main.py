@@ -89,7 +89,7 @@ def _build_todo_body(kv: dict, default_device: str) -> dict:
     "astrbot_plugin_zectrix",
     "Zectrix",
     "极趣待办 - 与极趣实验室 AI 待办清单硬件交互，支持待办管理、页面推送",
-    "0.1.0",
+    "0.1.1",
 )
 class ZectrixPlugin(star.Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -155,7 +155,7 @@ class ZectrixPlugin(star.Star):
             "ℹ️ zt help — 本帮助\n"
             "\n"
             "📝 待办:\n"
-            "  todo list\n"
+            "  todo list [status]       查看待办 (0=待完成, 1=已完成)\n"
             "  todo add 买牛奶 dueDate=2026-04-15 priority=重要\n"
             "  todo done <ID>\n"
             "  todo del <ID>\n"
@@ -169,7 +169,9 @@ class ZectrixPlugin(star.Star):
             "\n"
             "💡 优先级: 普通/重要/紧急\n"
             "   重复: 每天/每周/每月/每年\n"
-            "   页面: 1-5"
+            "   页面: 1-5\n"
+            "\n"
+            "📌 所有命令自动使用插件设置中的默认设备 ID，无需手动输入 MAC 地址"
         )
 
     # ===================== todo 命令组 =====================
@@ -179,11 +181,11 @@ class ZectrixPlugin(star.Star):
         pass
 
     @todo.command("list")
-    async def todo_list(self, event: AstrMessageEvent, device_id: str = "", status_filter: str = ""):
+    async def todo_list(self, event: AstrMessageEvent, status_filter: str = ""):
         """查看待办列表"""
         try:
             params = {}
-            did = device_id or self.default_device_id
+            did = self.default_device_id
             if did:
                 params["deviceId"] = did
             if status_filter in ("0", "1"):
