@@ -23,22 +23,24 @@
 
 所有命令以 `zt` 为前缀，输入 `zt help` 查看完整帮助。
 
+> 📌 所有命令自动使用插件设置中的默认设备 ID，无需手动输入 MAC 地址。
+
 ```
 zt config                              # 查看当前配置
 zt devices                             # 查看设备列表
 
 zt todo list                           # 查看待办
-zt todo list AA:BB:CC:DD:EE:FF 0      # 按设备/状态过滤
+zt todo list 0                         # 按状态过滤 (0=待完成, 1=已完成)
 zt todo add 买牛奶 dueDate=2026-04-15 priority=重要
 zt todo done 1                         # 切换完成状态
 zt todo del 1                          # 删除待办
 zt todo update 1 title=买牛奶和面包    # 更新待办
 
-zt push text AA:BB:CC:DD:EE:FF 今日天气晴 fontSize=24 pageId=1
-zt push structured AA:BB:CC:DD:EE:FF title=会议提醒 body=15:00 三楼会议室
-zt push image AA:BB:CC:DD:EE:FF 1     # 附带图片一起发送
-zt push clear AA:BB:CC:DD:EE:FF 1     # 清除指定页面
-zt push clear AA:BB:CC:DD:EE:FF       # 清除所有页面
+zt push text 今日天气晴 fontSize=24 pageId=1
+zt push structured title=会议提醒 body=15:00 三楼会议室
+zt push image 1                        # 附带图片一起发送
+zt push clear 1                        # 清除指定页面
+zt push clear                          # 清除所有页面
 ```
 
 ### 🤖 自然语言命令
