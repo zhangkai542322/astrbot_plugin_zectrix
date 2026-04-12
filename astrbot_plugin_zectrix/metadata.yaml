@@ -1,0 +1,5 @@
+name: astrbot_plugin_zectrix
+display_name: 极趣待办(Zectrix Todo)
+desc: 与极趣实验室AI待办清单硬件交互，支持待办管理、页面推送等功能
+version: v0.1.0
+author: AstrBot Plugin
