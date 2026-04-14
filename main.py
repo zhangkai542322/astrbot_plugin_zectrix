@@ -1,16 +1,20 @@
 """
-AstrBot 插件：极趣待办 (Zectrix Todo)
+AstrBot 插件：极趣AI便利贴(Zectrix Todo)
 与极趣实验室 AI 待办清单硬件交互，支持待办管理、页面推送等全部 API 功能。
+通过本插件建立与官方api的桥梁,支持对插件功能进行扩展
 """
 
 import json
 import os
 import tempfile
+import logging
 
 import aiohttp
 from astrbot.api import star, AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import register, Context
+
+logger = logging.getLogger("Zectrix")
 
 PRIORITY_MAP = {"普通": 0, "重要": 1, "紧急": 2, "0": 0, "1": 1, "2": 2}
 PRIORITY_EMOJI = {0: "⬜ 普通", 1: "🟡 重要", 2: "🔴 紧急"}
@@ -85,11 +89,108 @@ def _build_todo_body(kv: dict, default_device: str) -> dict:
     return body
 
 
+async def _load_image_from_any_source(image_url: str = "", image_path: str = "",
+                                       event=None) -> tuple:
+    """
+    从任意来源加载图片字节。
+    支持: HTTP(S) URL, file:// URI, 本地绝对路径, 消息中的图片。
+    返回: (image_bytes, filename) 或 (None, error_msg)
+    """
+    # 1. 本地路径（绝对路径或 file:// URI）
+    local_path = None
+    if image_path:
+        local_path = image_path
+    elif image_url:
+        if image_url.startswith("file://"):
+            local_path = image_url[7:]
+        elif os.path.isabs(image_url) and os.path.exists(image_url):
+            local_path = image_url
+
+    if local_path:
+        if os.path.exists(local_path):
+            try:
+                with open(local_path, "rb") as f:
+                    data = f.read()
+                ext = os.path.splitext(local_path)[1].lower() or ".png"
+                fname = f"image{ext}"
+                logger.info(f"从本地路径加载图片: {local_path} ({len(data)} bytes)")
+                return data, fname
+            except Exception as e:
+                return None, f"读取本地文件失败: {e}"
+        else:
+            return None, f"本地文件不存在: {local_path}"
+
+    # 2. 消息中附带的图片
+    if event:
+        try:
+            from astrbot.core.message.components import Image as ImageComp
+            for comp in event.get_messages():
+                if isinstance(comp, ImageComp):
+                    msg_image_path = await comp.convert_to_file_path()
+                    if msg_image_path and os.path.exists(msg_image_path):
+                        with open(msg_image_path, "rb") as f:
+                            data = f.read()
+                        fname = os.path.basename(msg_image_path) or "image.png"
+                        logger.info(f"从消息加载图片: {msg_image_path} ({len(data)} bytes)")
+                        # 清理临时文件
+                        try:
+                            if msg_image_path.startswith(tempfile.gettempdir()):
+                                os.unlink(msg_image_path)
+                        except OSError:
+                            pass
+                        return data, fname
+        except Exception as e:
+            logger.debug(f"提取消息图片失败: {e}")
+
+    # 3. HTTP(S) URL 下载
+    if image_url and image_url.startswith(("http://", "https://")):
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(image_url, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                    if r.status != 200:
+                        return None, f"下载图片失败，HTTP {r.status}"
+                    data = await r.read()
+                    ct = r.headers.get("Content-Type", "")
+                    if "jpeg" in ct or "jpg" in ct:
+                        fname = "image.jpg"
+                    elif "gif" in ct:
+                        fname = "image.gif"
+                    elif "webp" in ct:
+                        fname = "image.webp"
+                    elif "png" in ct:
+                        fname = "image.png"
+                    else:
+                        # 从 URL 推断
+                        ext = os.path.splitext(image_url.split("?")[0])[1].lower()
+                        fname = f"image{ext}" if ext else "image.png"
+                    logger.info(f"从URL下载图片: {image_url} ({len(data)} bytes)")
+                    return data, fname
+        except Exception as e:
+            return None, f"下载图片失败: {e}"
+
+    return None, None
+
+
+async def _push_image_bytes(api_base: str, headers: dict, device_id: str,
+                             image_bytes: bytes, filename: str,
+                             page_id: str = "", dither: bool = False) -> dict:
+    """推送图片字节到设备，返回 API 响应"""
+    form = aiohttp.FormData()
+    form.add_field("images", image_bytes, filename=filename)
+    form.add_field("dither", str(dither).lower())
+    if page_id:
+        form.add_field("pageId", page_id)
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"{api_base}/devices/{device_id}/display/image",
+                          headers=headers, data=form) as r:
+            return await r.json()
+
+
 @register(
     "astrbot_plugin_zectrix",
     "Zectrix",
     "极趣待办 - 与极趣实验室 AI 待办清单硬件交互，支持待办管理、页面推送",
-    "0.1.1",
+    "0.2.0",
 )
 class ZectrixPlugin(star.Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -111,7 +212,6 @@ class ZectrixPlugin(star.Star):
     @zt.command("config")
     async def zt_config(self, event: AstrMessageEvent):
         """查看当前配置"""
-        # 重新读取配置（用户可能在 WebUI 中修改过）
         self.api_base = self.config.get("api_base", self.api_base)
         self.api_key = self.config.get("api_key", self.api_key)
         self.default_device_id = self.config.get("default_device_id", self.default_device_id)
@@ -170,8 +270,6 @@ class ZectrixPlugin(star.Star):
             "💡 优先级: 普通/重要/紧急\n"
             "   重复: 每天/每周/每月/每年\n"
             "   页面: 1-5\n"
-            "\n"
-            "📌 所有命令自动使用插件设置中的默认设备 ID，无需手动输入 MAC 地址"
         )
 
     # ===================== todo 命令组 =====================
@@ -382,43 +480,20 @@ class ZectrixPlugin(star.Star):
         if not did:
             yield event.plain_result("❌ 请先在插件设置中配置默认设备 ID")
             return
-        image_path = None
-        try:
-            from astrbot.core.message.components import Image as ImageComp
-            for comp in event.get_messages():
-                if isinstance(comp, ImageComp):
-                    image_path = await comp.convert_to_file_path()
-                    break
-        except Exception:
-            pass
-        if not image_path:
+        image_bytes, filename = await _load_image_from_any_source(event=event)
+        if not image_bytes:
             yield event.plain_result("❌ 请在命令消息中附带图片")
             return
         try:
-            form = aiohttp.FormData()
-            with open(image_path, "rb") as f:
-                form.add_field("images", f.read(), filename="image.png")
-            form.add_field("dither", "true")
-            if page_id:
-                form.add_field("pageId", page_id)
-            async with aiohttp.ClientSession() as s:
-                async with s.post(f"{self.api_base}/devices/{did}/display/image",
-                                  headers=self._headers(), data=form) as r:
-                    data = await r.json()
-                    if data.get("code") != 0:
-                        yield event.plain_result(f"❌ {data.get('msg')}")
-                        return
-                    d = data.get("data", {})
-                    yield event.plain_result(f"✅ 图片已推送到页面 {d.get('pageId', '?')}")
+            data = await _push_image_bytes(self.api_base, self._headers(), did,
+                                           image_bytes, filename, page_id)
+            if data.get("code") != 0:
+                yield event.plain_result(f"❌ {data.get('msg')}")
+                return
+            d = data.get("data", {})
+            yield event.plain_result(f"✅ 图片已推送到页面 {d.get('pageId', '?')}")
         except Exception as e:
             yield event.plain_result(f"❌ {e}")
-        finally:
-            if image_path and os.path.exists(image_path):
-                try:
-                    if image_path.startswith(tempfile.gettempdir()):
-                        os.unlink(image_path)
-                except OSError:
-                    pass
 
     @push.command("clear")
     async def push_clear(self, event: AstrMessageEvent, page_id: str = ""):
@@ -677,77 +752,52 @@ class ZectrixPlugin(star.Star):
             return f"请求失败: {e}"
 
     @filter.llm_tool(name="push_image_to_device")
-    async def tool_push_image(self, event: AstrMessageEvent, image_url: str = "", page_id: str = "") -> str:
-        """推送图片到待办清单设备的屏幕上。支持用户直接发送图片或通过URL上传。
+    async def tool_push_image(self, event: AstrMessageEvent, image_url: str = "", image_path: str = "", page_id: str = "") -> str:
+        """推送图片到待办清单设备的屏幕上。支持多种图片来源：URL链接、本地文件路径、用户发送的图片。
+        与 daily_card 插件配合使用时，daily_card 返回的图片路径可直接传给 image_path 参数。
 
         Args:
-            image_url(string): 图片的URL链接，如果用户直接发送了图片则不需要此参数
+            image_url(string): 图片的HTTP(S) URL链接，如 https://example.com/image.png
+            image_path(string): 图片的本地绝对路径，如 /tmp/weather_xxx.png。daily_card 插件生成的图片路径传这里
             page_id(string): 页面编号1-5
         """
         did = self.default_device_id
         if not did:
             return "未配置默认设备ID，请先在插件设置中配置"
 
-        image_bytes = None
-        filename = "image.png"
+        # 从任意来源加载图片
+        image_bytes, filename, err = None, None, None
 
-        # 方式1：从用户消息中提取直接发送的图片
-        try:
-            from astrbot.core.message.components import Image as ImageComp
-            for comp in event.get_messages():
-                if isinstance(comp, ImageComp):
-                    image_path = await comp.convert_to_file_path()
-                    if image_path and os.path.exists(image_path):
-                        with open(image_path, "rb") as f:
-                            image_bytes = f.read()
-                        filename = os.path.basename(image_path) or "image.png"
-                        # 清理临时文件
-                        try:
-                            if image_path.startswith(tempfile.gettempdir()):
-                                os.unlink(image_path)
-                        except OSError:
-                            pass
-                        break
-        except Exception:
-            pass
+        # 优先用 image_path（本地路径）
+        if image_path:
+            result = await _load_image_from_any_source(image_path=image_path)
+            image_bytes, filename = result
+            if not image_bytes:
+                return filename  # filename 此时是错误信息
 
-        # 方式2：从URL下载图片
+        # 其次尝试 image_url（URL 或 file://）
         if not image_bytes and image_url:
-            try:
-                async with aiohttp.ClientSession() as s:
-                    async with s.get(image_url) as r:
-                        if r.status != 200:
-                            return f"下载图片失败，HTTP {r.status}"
-                        image_bytes = await r.read()
-                        # 从Content-Type推断文件名
-                        ct = r.headers.get("Content-Type", "")
-                        if "jpeg" in ct or "jpg" in ct:
-                            filename = "image.jpg"
-                        elif "gif" in ct:
-                            filename = "image.gif"
-                        elif "webp" in ct:
-                            filename = "image.webp"
-            except Exception as e:
-                return f"下载图片失败: {e}"
+            result = await _load_image_from_any_source(image_url=image_url)
+            image_bytes, filename = result
+            if not image_bytes:
+                return filename
+
+        # 最后尝试消息中的图片
+        if not image_bytes:
+            result = await _load_image_from_any_source(event=event)
+            image_bytes, filename = result
 
         if not image_bytes:
-            return "请直接发送一张图片，或提供图片的URL链接"
+            return "请提供图片。支持：本地路径(image_path)、URL链接(image_url)、或直接发送图片到聊天"
 
         # 推送到设备
         try:
-            form = aiohttp.FormData()
-            form.add_field("images", image_bytes, filename=filename)
-            form.add_field("dither", "true")
-            if page_id:
-                form.add_field("pageId", page_id)
-            async with aiohttp.ClientSession() as s:
-                async with s.post(f"{self.api_base}/devices/{did}/display/image",
-                                  headers=self._headers(), data=form) as r:
-                    data = await r.json()
-                    if data.get("code") != 0:
-                        return f"推送失败: {data.get('msg')}"
-                    d = data.get("data", {})
-                    return f"图片已推送到设备，页面 {d.get('pageId', '?')}"
+            data = await _push_image_bytes(self.api_base, self._headers(), did,
+                                           image_bytes, filename, page_id)
+            if data.get("code") != 0:
+                return f"推送失败: {data.get('msg')}"
+            d = data.get("data", {})
+            return f"图片已推送到设备，页面 {d.get('pageId', '?')}"
         except Exception as e:
             return f"推送失败: {e}"
 
